@@ -1,0 +1,58 @@
+services:
+
+  db:
+    image: pgvector/pgvector:pg14
+    container_name: suffaai_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_DB: suffaai_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d suffaai_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: suffaai_pgadmin
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+
+  web:
+    container_name: django_server
+    image: suffaai/metastore:latest
+    restart: always
+    command: >
+      sh -c "python3 manage.py migrate --noinput &&
+             python3 manage.py runserver 0.0.0.0:7000"
+    volumes:
+      - .:/usr/src/app
+    ports:
+      - "7000:7000"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_DB: suffaai_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+    extra_hosts:
+        - "host.docker.internal:host-gateway"
+
+
+volumes:
+  postgres_data:
