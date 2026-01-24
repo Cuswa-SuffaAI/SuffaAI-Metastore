@@ -25,7 +25,7 @@ SECRET_KEY = 'django-insecure-l%tbg4dk07u4*t16vp-qjp-15f%xhp+fw&l1kgrornd6js2$fn
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', 'suffaai-metastore']
 
 
 # Application definition
@@ -37,8 +37,18 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'rest_framework',
     'chatApp.apps.ChatappConfig',
 ]
+
+# Django REST Framework settings
+REST_FRAMEWORK = {
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.AllowAny',
+    ],
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 20,
+}
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',

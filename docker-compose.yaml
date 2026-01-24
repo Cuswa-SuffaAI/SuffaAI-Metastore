@@ -35,7 +35,7 @@ services:
       - suffaai_network
 
   web:
-    container_name: django_server
+    container_name: suffaai-metastore
     image: suffaai/metastore:latest
     restart: always
     command: >
