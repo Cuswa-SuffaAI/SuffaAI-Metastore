@@ -17,8 +17,10 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    networks:
-      - suffaai_network
+    network_mode: "host"
+
+    # networks:
+    #   - suffaai_network
 
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -31,8 +33,10 @@ services:
       - "5050:80"
     depends_on:
       - db
-    networks:
-      - suffaai_network
+    network_mode: "host"
+
+    # networks:
+    #   - suffaai_network
 
   web:
     container_name: suffaai-metastore
@@ -52,16 +56,17 @@ services:
       POSTGRES_DB: suffaai_db
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres123
-      POSTGRES_HOST: db
+      POSTGRES_HOST: 100.101.93.63
       POSTGRES_PORT: 5432
     extra_hosts:
         - "host.docker.internal:host-gateway"
-    networks:
-      - suffaai_network
+    network_mode: "host"
+#     networks:
+#       - suffaai_network
 
-networks:
-  suffaai_network:
-    external: true
+# networks:
+#   suffaai_network:
+#     external: true
 
 volumes:
   postgres_data:

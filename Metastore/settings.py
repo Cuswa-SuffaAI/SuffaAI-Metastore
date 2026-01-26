@@ -25,7 +25,7 @@ SECRET_KEY = 'django-insecure-l%tbg4dk07u4*t16vp-qjp-15f%xhp+fw&l1kgrornd6js2$fn
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', 'suffaai-metastore']
+ALLOWED_HOSTS = ['localhost', '100.101.93.63', '127.0.0.1', '0.0.0.0', 'suffaai-metastore']
 
 
 # Application definition
