@@ -79,8 +79,10 @@ class HadithViewSet(viewsets.ModelViewSet):
             result = HadithService.bulk_create_hadiths(hadiths_data)
             return Response(result, status=status.HTTP_201_CREATED)
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             return Response(
-                {'error': str(e)},
+                {'error': str(e), 'traceback': traceback.format_exc()},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 

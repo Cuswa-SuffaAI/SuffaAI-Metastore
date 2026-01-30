@@ -106,9 +106,9 @@ class SystemRelationship(models.Model):
 class Hadith(models.Model):
     """Hadith model - stores hadith texts with narrators and embeddings."""
     id = models.BigAutoField(primary_key=True)
-    hadith_number = models.PositiveIntegerField()
+    hadith_number = models.PositiveIntegerField(null=True, blank=True)
     narrator = models.CharField(max_length=255, null=True, blank=True)
-    narrator_arabic = models.CharField(max_length=500, null=True, blank=True)
+    narrator_arabic = models.TextField(null=True, blank=True)
     hadith_text_turkish = models.TextField(null=True, blank=True)
     hadith_text_arabic = models.TextField(null=True, blank=True)
     language = models.CharField(max_length=10, default='tr-ar')
@@ -135,7 +135,7 @@ class HadithEmbedding(models.Model):
         on_delete=models.CASCADE,
         related_name='embeddings'
     )
-    hadith_number = models.PositiveIntegerField()
+    hadith_number = models.PositiveIntegerField(null=True, blank=True)
     embedding_turkish = VectorField(dimensions=768, null=True, blank=True)
     embedding_arabic = VectorField(dimensions=768, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -194,7 +194,7 @@ class HadithChunkEmbedding(models.Model):
         on_delete=models.CASCADE,
         related_name='chunk_embeddings'
     )
-    hadith_number = models.PositiveIntegerField()
+    hadith_number = models.PositiveIntegerField(null=True, blank=True)
     chunk_index = models.PositiveIntegerField()
     chunk_text = models.TextField()
     language = models.CharField(max_length=10, choices=[

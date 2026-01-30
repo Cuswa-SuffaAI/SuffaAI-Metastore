@@ -39,16 +39,29 @@ class HadithService:
         """
         created_hadiths = []
         all_sources = []
+        null_hadith_numbers = 0
 
         # First pass: create Hadith objects
         hadith_objects = []
         sources_mapping = []  # Store sources for each hadith index
 
         for item in hadiths_data:
+            # Hadis numarası kontrolü - geçersiz ise null olarak kaydet
+            hadith_number = item.get('hadith_number')
+            if isinstance(hadith_number, str):
+                try:
+                    hadith_number = int(hadith_number)
+                except ValueError:
+                    hadith_number = None
+            if hadith_number is not None and hadith_number <= 0:
+                hadith_number = None
+            if hadith_number is None:
+                null_hadith_numbers += 1
+
             sources = item.pop('sources', [])
             sources_mapping.append(sources)
             hadith_objects.append(Hadith(
-                hadith_number=item.get('hadith_number'),
+                hadith_number=hadith_number,
                 narrator=item.get('narrator'),
                 narrator_arabic=item.get('narrator_arabic'),
                 hadith_text_turkish=item.get('hadith_text_turkish'),
@@ -76,6 +89,7 @@ class HadithService:
             'hadiths_created': len(created_hadiths),
             'sources_created': len(all_sources),
             'hadith_ids': [h.id for h in created_hadiths],
+            'null_hadith_numbers': null_hadith_numbers,
         }
 
     @staticmethod
@@ -385,7 +399,7 @@ class ChunkEmbeddingService:
                     'hadith_text_turkish': r.hadith.hadith_text_turkish,
                     'hadith_text_arabic': r.hadith.hadith_text_arabic,
                     'sources': [
-                        {'source_name': s.name}
+                        {'source_name': s.name, 'reference': s.reference}
                         for s in r.hadith.sources.all()
                     ]
                 }
