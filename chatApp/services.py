@@ -1,6 +1,7 @@
 from django.db import transaction
 from pgvector.django import CosineDistance, L2Distance, MaxInnerProduct
 from .models import Hadith, HadithEmbedding, HadithSource, HadithChunkEmbedding
+from .models import SiyerSection, SiyerChunkEmbedding
 
 
 class HadithService:
@@ -67,6 +68,9 @@ class HadithService:
                 hadith_text_turkish=item.get('hadith_text_turkish'),
                 hadith_text_arabic=item.get('hadith_text_arabic'),
                 language=item.get('language', 'tr-ar'),
+                potential_questions=item.get('potential_questions'),
+                embedding_text=item.get('embedding_text'),
+                priority_keywords=item.get('priority_keywords'),
             ))
 
         # Bulk create hadiths
@@ -253,6 +257,11 @@ class EmbeddingService:
             distance_type='cosine'
         )
 
+        # Prefetch sources for all hadiths
+        hadith_ids = [r.hadith.id for r in results]
+        hadiths_with_sources = Hadith.objects.filter(id__in=hadith_ids).prefetch_related('sources')
+        hadith_map = {h.id: h for h in hadiths_with_sources}
+
         return [
             {
                 'hadith_number': r.hadith_number,
@@ -260,8 +269,14 @@ class EmbeddingService:
                 'narrator': r.hadith.narrator,
                 'hadith_text_turkish': r.hadith.hadith_text_turkish,
                 'hadith_text_arabic': r.hadith.hadith_text_arabic,
+                'embedding_text': r.hadith.embedding_text,
+                'priority_keywords': r.hadith.priority_keywords,
+                'sources': [
+                    {'name': s.name, 'reference': s.reference}
+                    for s in hadith_map.get(r.hadith.id, r.hadith).sources.all()
+                ],
                 'distance': float(r.distance),
-                'similarity': 1 - float(r.distance),  # Cosine similarity = 1 - cosine distance
+                'similarity': 1 - float(r.distance),
             }
             for r in results
         ]
@@ -280,9 +295,9 @@ class ChunkEmbeddingService:
         [
             {
                 "hadith_number": 15,
+                "chunk_type": "embedding_text",  # or "potential_question"
                 "chunk_index": 0,
                 "chunk_text": "...",
-                "language": "turkish",
                 "embedding": [0.1, 0.2, ...]  # 768 dimensions
             },
             ...
@@ -312,9 +327,9 @@ class ChunkEmbeddingService:
                 chunk_objects.append(HadithChunkEmbedding(
                     hadith=hadith,
                     hadith_number=hadith_number,
-                    chunk_index=item.get('chunk_index'),
+                    chunk_type=item.get('chunk_type', 'embedding_text'),
+                    chunk_index=item.get('chunk_index', 0),
                     chunk_text=item.get('chunk_text'),
-                    language=item.get('language'),
                     embedding=item.get('embedding'),
                 ))
 
@@ -329,18 +344,18 @@ class ChunkEmbeddingService:
         }
 
     @staticmethod
-    def delete_chunks_for_hadith(hadith_number: int, language: str = None) -> int:
+    def delete_chunks_for_hadith(hadith_number: int, chunk_type: str = None) -> int:
         """Delete existing chunks for a hadith before re-creating."""
         queryset = HadithChunkEmbedding.objects.filter(hadith_number=hadith_number)
-        if language:
-            queryset = queryset.filter(language=language)
+        if chunk_type:
+            queryset = queryset.filter(chunk_type=chunk_type)
         count, _ = queryset.delete()
         return count
 
     @staticmethod
     def search_similar_chunks(
         query_embedding: list,
-        language: str = 'turkish',
+        chunk_type: str = None,
         limit: int = 10
     ):
         """
@@ -348,7 +363,7 @@ class ChunkEmbeddingService:
 
         Args:
             query_embedding: 768-dimensional vector
-            language: 'turkish' or 'arabic'
+            chunk_type: 'embedding_text' or 'potential_question' (None for all)
             limit: max results to return
 
         Returns:
@@ -356,9 +371,12 @@ class ChunkEmbeddingService:
         """
         distance_func = CosineDistance('embedding', query_embedding)
 
+        queryset = HadithChunkEmbedding.objects.all()
+        if chunk_type:
+            queryset = queryset.filter(chunk_type=chunk_type)
+
         results = (
-            HadithChunkEmbedding.objects
-            .filter(language=language)
+            queryset
             .annotate(distance=distance_func)
             .order_by('distance')
             .select_related('hadith')
@@ -369,9 +387,108 @@ class ChunkEmbeddingService:
         return results
 
     @staticmethod
+    def search_with_combined_score(
+        query_embedding: list,
+        limit: int = 10,
+        embedding_text_weight: float = 0.4,
+        question_weight: float = 0.6
+    ):
+        """
+        Search hadiths using combined score from embedding_text and potential_questions.
+
+        The combined score is calculated as:
+        - Best embedding_text similarity * embedding_text_weight
+        - Best potential_question similarity * question_weight
+
+        Args:
+            query_embedding: 768-dimensional vector
+            limit: max results to return
+            embedding_text_weight: weight for embedding_text similarity (default 0.4)
+            question_weight: weight for potential_question similarity (default 0.6)
+
+        Returns:
+            List of dicts with hadith info and combined score
+        """
+        distance_func = CosineDistance('embedding', query_embedding)
+
+        # Get all chunks with distances
+        all_chunks = (
+            HadithChunkEmbedding.objects
+            .annotate(distance=distance_func)
+            .select_related('hadith')
+            .prefetch_related('hadith__sources')
+            .order_by('distance')
+        )
+
+        # Group by hadith_number and calculate combined scores
+        hadith_scores = {}
+
+        for chunk in all_chunks:
+            hadith_num = chunk.hadith_number
+            similarity = 1 - float(chunk.distance)  # Convert distance to similarity
+
+            if hadith_num not in hadith_scores:
+                hadith_scores[hadith_num] = {
+                    'hadith': chunk.hadith,
+                    'embedding_text_similarity': 0.0,
+                    'best_question_similarity': 0.0,
+                    'matching_questions': [],
+                }
+
+            if chunk.chunk_type == 'embedding_text':
+                hadith_scores[hadith_num]['embedding_text_similarity'] = similarity
+            elif chunk.chunk_type == 'potential_question':
+                # Keep track of best question match
+                if similarity > hadith_scores[hadith_num]['best_question_similarity']:
+                    hadith_scores[hadith_num]['best_question_similarity'] = similarity
+                # Also store matching questions with high similarity
+                if similarity > 0.5:
+                    hadith_scores[hadith_num]['matching_questions'].append({
+                        'question': chunk.chunk_text,
+                        'similarity': similarity
+                    })
+
+        # Calculate combined scores
+        results = []
+        for hadith_num, data in hadith_scores.items():
+            combined_score = (
+                data['embedding_text_similarity'] * embedding_text_weight +
+                data['best_question_similarity'] * question_weight
+            )
+
+            hadith = data['hadith']
+            results.append({
+                'hadith_number': hadith_num,
+                'hadith_id': hadith.id,
+                'narrator': hadith.narrator,
+                'hadith_text_turkish': hadith.hadith_text_turkish,
+                'hadith_text_arabic': hadith.hadith_text_arabic,
+                'embedding_text': hadith.embedding_text,
+                'priority_keywords': hadith.priority_keywords,
+                'sources': [
+                    {'source_name': s.name, 'reference': s.reference}
+                    for s in hadith.sources.all()
+                ],
+                'scores': {
+                    'combined': combined_score,
+                    'embedding_text_similarity': data['embedding_text_similarity'],
+                    'best_question_similarity': data['best_question_similarity'],
+                },
+                'matching_questions': sorted(
+                    data['matching_questions'],
+                    key=lambda x: x['similarity'],
+                    reverse=True
+                )[:3]  # Top 3 matching questions
+            })
+
+        # Sort by combined score and return top results
+        results.sort(key=lambda x: x['scores']['combined'], reverse=True)
+        return results[:limit]
+
+    @staticmethod
     def search_similar_with_details(
         query_embedding: list,
-        language: str = 'turkish',
+        chunk_type: str = None,
         limit: int = 10
     ):
         """
@@ -381,27 +498,361 @@ class ChunkEmbeddingService:
         """
         results = ChunkEmbeddingService.search_similar_chunks(
             query_embedding=query_embedding,
-            language=language,
+            chunk_type=chunk_type,
+            limit=limit
+        )
+
+        # Prefetch sources to avoid N+1 queries
+        hadith_ids = [r.hadith_id for r in results]
+        hadiths_with_sources = Hadith.objects.filter(id__in=hadith_ids).prefetch_related('sources')
+        hadith_map = {h.id: h for h in hadiths_with_sources}
+
+        return [
+            {
+                'chunk_id': r.id,
+                'hadith_number': r.hadith_number,
+                'chunk_type': r.chunk_type,
+                'chunk_index': r.chunk_index,
+                'chunk_text': r.chunk_text,
+                'distance': float(r.distance),
+                'similarity': 1 - float(r.distance),
+                'hadith': {
+                    'id': r.hadith.id,
+                    'narrator': r.hadith.narrator,
+                    'hadith_text_turkish': r.hadith.hadith_text_turkish,
+                    'hadith_text_arabic': r.hadith.hadith_text_arabic,
+                    'embedding_text': r.hadith.embedding_text,
+                    'priority_keywords': r.hadith.priority_keywords,
+                    'sources': [
+                        {'source_name': s.name, 'reference': s.reference}
+                        for s in hadith_map.get(r.hadith_id, r.hadith).sources.all()
+                    ]
+                }
+            }
+            for r in results
+        ]
+
+
+# ============================================================
+# SIYER SERVİSLERİ
+# ============================================================
+
+class SiyerService:
+    """Business logic for Siyer operations."""
+
+    @staticmethod
+    def create_section(data: dict) -> SiyerSection:
+        """Create a single siyer section from gpt_metadata.json format."""
+        return SiyerSection.objects.create(
+            section_id=data.get('id'),
+            text=data.get('text'),
+            pages=data.get('pages'),
+            summary_short=data.get('content_information', {}).get('summary_short'),
+            main_theme=data.get('content_information', {}).get('main_theme'),
+            potential_questions=data.get('potential_questions'),
+            query_intents=data.get('retrieval_hints', {}).get('query_intents'),
+        )
+
+    @staticmethod
+    @transaction.atomic
+    def bulk_create_sections(sections_data: list[dict]) -> dict:
+        """
+        Bulk create siyer sections.
+
+        Expected format (gpt_metadata.json):
+        [
+            {
+                "id": "siyer_1b257eea63da",
+                "text": "...",
+                "pages": [12, 13, 14],
+                "content_information": {
+                    "summary_short": "...",
+                    "main_theme": "..."
+                },
+                "potential_questions": ["Soru 1?", ...],
+                "retrieval_hints": {
+                    "query_intents": ["anahtar1", ...]
+                }
+            },
+            ...
+        ]
+        """
+        section_objects = []
+        skipped = []
+
+        # Check for existing section_ids
+        incoming_ids = [item.get('id') for item in sections_data]
+        existing_ids = set(
+            SiyerSection.objects.filter(section_id__in=incoming_ids)
+            .values_list('section_id', flat=True)
+        )
+
+        for item in sections_data:
+            section_id = item.get('id')
+            if section_id in existing_ids:
+                skipped.append(section_id)
+                continue
+
+            content_info = item.get('content_information', {})
+            retrieval_hints = item.get('retrieval_hints', {})
+
+            section_objects.append(SiyerSection(
+                section_id=section_id,
+                text=item.get('text'),
+                pages=item.get('pages'),
+                summary_short=content_info.get('summary_short'),
+                main_theme=content_info.get('main_theme'),
+                potential_questions=item.get('potential_questions'),
+                query_intents=retrieval_hints.get('query_intents'),
+            ))
+
+        created_sections = []
+        if section_objects:
+            created_sections = SiyerSection.objects.bulk_create(section_objects)
+
+        return {
+            'sections_created': len(created_sections),
+            'skipped_existing': skipped,
+            'section_ids': [s.section_id for s in created_sections],
+        }
+
+    @staticmethod
+    def get_section_by_id(section_id: str) -> SiyerSection:
+        """Get a siyer section by its section_id."""
+        return SiyerSection.objects.get(section_id=section_id)
+
+    @staticmethod
+    def search_by_theme(theme: str):
+        """Search siyer sections by main theme."""
+        return SiyerSection.objects.filter(main_theme__icontains=theme)
+
+    @staticmethod
+    def search_by_page(page_number: int):
+        """Search siyer sections that contain a specific page."""
+        return SiyerSection.objects.filter(pages__contains=[page_number])
+
+
+class SiyerChunkEmbeddingService:
+    """Business logic for siyer chunk-based embedding operations."""
+
+    @staticmethod
+    @transaction.atomic
+    def bulk_create_chunk_embeddings(chunks_data: list[dict]) -> dict:
+        """
+        Bulk create chunk embeddings for siyer sections.
+
+        Expected format:
+        [
+            {
+                "section_id": "siyer_1b257eea63da",
+                "chunk_type": "summary",  # or "potential_question", "query_intent"
+                "chunk_index": 0,
+                "chunk_text": "...",
+                "embedding": [0.1, 0.2, ...]  # 768 dimensions
+            },
+            ...
+        ]
+        """
+        # Get unique section_ids
+        section_ids = list(set(item.get('section_id') for item in chunks_data))
+
+        # Fetch all sections in one query
+        sections = SiyerSection.objects.filter(section_id__in=section_ids)
+        section_map = {s.section_id: s for s in sections}
+
+        # Check for missing sections
+        missing = set(section_ids) - set(section_map.keys())
+        if missing:
+            return {
+                'error': f'Sections not found for section_ids: {list(missing)}',
+                'chunks_created': 0,
+            }
+
+        # Prepare chunk objects
+        chunk_objects = []
+        for item in chunks_data:
+            section_id = item.get('section_id')
+            section = section_map.get(section_id)
+            if section:
+                chunk_objects.append(SiyerChunkEmbedding(
+                    section=section,
+                    section_code=section_id,
+                    chunk_type=item.get('chunk_type'),
+                    chunk_index=item.get('chunk_index', 0),
+                    chunk_text=item.get('chunk_text'),
+                    embedding=item.get('embedding'),
+                ))
+
+        created_chunks = []
+        if chunk_objects:
+            created_chunks = SiyerChunkEmbedding.objects.bulk_create(chunk_objects)
+
+        return {
+            'chunks_created': len(created_chunks),
+            'chunk_ids': [c.id for c in created_chunks],
+        }
+
+    @staticmethod
+    def delete_chunks_for_section(section_id: str, chunk_type: str = None) -> int:
+        """Delete existing chunks for a section before re-creating."""
+        queryset = SiyerChunkEmbedding.objects.filter(section_code=section_id)
+        if chunk_type:
+            queryset = queryset.filter(chunk_type=chunk_type)
+        count, _ = queryset.delete()
+        return count
+
+    @staticmethod
+    def search_similar_chunks(
+        query_embedding: list,
+        chunk_type: str = None,
+        limit: int = 10
+    ):
+        """
+        Search similar siyer chunks using pgvector similarity search.
+
+        Args:
+            query_embedding: 768-dimensional vector
+            chunk_type: 'summary', 'potential_question', 'query_intent' (None for all)
+            limit: max results to return
+        """
+        distance_func = CosineDistance('embedding', query_embedding)
+
+        queryset = SiyerChunkEmbedding.objects.all()
+        if chunk_type:
+            queryset = queryset.filter(chunk_type=chunk_type)
+
+        results = (
+            queryset
+            .annotate(distance=distance_func)
+            .order_by('distance')
+            .select_related('section')
+            [:limit]
+        )
+
+        return results
+
+    @staticmethod
+    def search_with_combined_score(
+        query_embedding: list,
+        limit: int = 10,
+        summary_weight: float = 0.3,
+        question_weight: float = 0.5,
+        intent_weight: float = 0.2
+    ):
+        """
+        Search siyer sections using combined score from all chunk types.
+
+        Args:
+            query_embedding: 768-dimensional vector
+            limit: max results to return
+            summary_weight: weight for summary similarity
+            question_weight: weight for potential_question similarity
+            intent_weight: weight for query_intent similarity
+        """
+        distance_func = CosineDistance('embedding', query_embedding)
+
+        all_chunks = (
+            SiyerChunkEmbedding.objects
+            .annotate(distance=distance_func)
+            .select_related('section')
+            .order_by('distance')
+        )
+
+        # Group by section_code and calculate combined scores
+        section_scores = {}
+
+        for chunk in all_chunks:
+            sid = chunk.section_code
+            similarity = 1 - float(chunk.distance)
+
+            if sid not in section_scores:
+                section_scores[sid] = {
+                    'section': chunk.section,
+                    'summary_similarity': 0.0,
+                    'best_question_similarity': 0.0,
+                    'best_intent_similarity': 0.0,
+                    'matching_questions': [],
+                }
+
+            if chunk.chunk_type == 'summary':
+                section_scores[sid]['summary_similarity'] = similarity
+            elif chunk.chunk_type == 'potential_question':
+                if similarity > section_scores[sid]['best_question_similarity']:
+                    section_scores[sid]['best_question_similarity'] = similarity
+                if similarity > 0.5:
+                    section_scores[sid]['matching_questions'].append({
+                        'question': chunk.chunk_text,
+                        'similarity': similarity
+                    })
+            elif chunk.chunk_type == 'query_intent':
+                if similarity > section_scores[sid]['best_intent_similarity']:
+                    section_scores[sid]['best_intent_similarity'] = similarity
+
+        # Calculate combined scores
+        results = []
+        for sid, data in section_scores.items():
+            combined_score = (
+                data['summary_similarity'] * summary_weight +
+                data['best_question_similarity'] * question_weight +
+                data['best_intent_similarity'] * intent_weight
+            )
+
+            section = data['section']
+            results.append({
+                'section_id': sid,
+                'text': section.text,
+                'pages': section.pages,
+                'summary_short': section.summary_short,
+                'main_theme': section.main_theme,
+                'potential_questions': section.potential_questions,
+                'query_intents': section.query_intents,
+                'scores': {
+                    'combined': combined_score,
+                    'summary_similarity': data['summary_similarity'],
+                    'best_question_similarity': data['best_question_similarity'],
+                    'best_intent_similarity': data['best_intent_similarity'],
+                },
+                'matching_questions': sorted(
+                    data['matching_questions'],
+                    key=lambda x: x['similarity'],
+                    reverse=True
+                )[:3]
+            })
+
+        results.sort(key=lambda x: x['scores']['combined'], reverse=True)
+        return results[:limit]
+
+    @staticmethod
+    def search_similar_with_details(
+        query_embedding: list,
+        chunk_type: str = None,
+        limit: int = 10
+    ):
+        """
+        Search similar siyer chunks and return full section details.
+        """
+        results = SiyerChunkEmbeddingService.search_similar_chunks(
+            query_embedding=query_embedding,
+            chunk_type=chunk_type,
             limit=limit
         )
 
         return [
             {
                 'chunk_id': r.id,
-                'hadith_number': r.hadith_number,
+                'section_id': r.section_code,
+                'chunk_type': r.chunk_type,
                 'chunk_index': r.chunk_index,
                 'chunk_text': r.chunk_text,
-                'language': r.language,
                 'distance': float(r.distance),
-                'hadith': {
-                    'id': r.hadith.id,
-                    'narrator': r.hadith.narrator,
-                    'hadith_text_turkish': r.hadith.hadith_text_turkish,
-                    'hadith_text_arabic': r.hadith.hadith_text_arabic,
-                    'sources': [
-                        {'source_name': s.name, 'reference': s.reference}
-                        for s in r.hadith.sources.all()
-                    ]
+                'similarity': 1 - float(r.distance),
+                'section': {
+                    'text': r.section.text,
+                    'pages': r.section.pages,
+                    'summary_short': r.section.summary_short,
+                    'main_theme': r.section.main_theme,
+                    'potential_questions': r.section.potential_questions,
+                    'query_intents': r.section.query_intents,
                 }
             }
             for r in results

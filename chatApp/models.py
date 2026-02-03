@@ -104,7 +104,7 @@ class SystemRelationship(models.Model):
 
 
 class Hadith(models.Model):
-    """Hadith model - stores hadith texts with narrators and embeddings."""
+    """Hadith model - stores hadith texts with narrators and metadata."""
     id = models.BigAutoField(primary_key=True)
     hadith_number = models.PositiveIntegerField(null=True, blank=True)
     narrator = models.CharField(max_length=255, null=True, blank=True)
@@ -112,6 +112,10 @@ class Hadith(models.Model):
     hadith_text_turkish = models.TextField(null=True, blank=True)
     hadith_text_arabic = models.TextField(null=True, blank=True)
     language = models.CharField(max_length=10, default='tr-ar')
+    # Enriched metadata fields
+    potential_questions = models.JSONField(null=True, blank=True)
+    embedding_text = models.TextField(null=True, blank=True)
+    priority_keywords = models.JSONField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -185,9 +189,16 @@ class HadithSource(models.Model):
 
 class HadithChunkEmbedding(models.Model):
     """
-    Hadith chunk embeddings - stores vector embeddings for individual text chunks.
-    Each hadith can have multiple chunks for better semantic search precision.
+    Hadith chunk embeddings - stores vector embeddings for embedding_text and potential_questions.
+    Each hadith has:
+    - 1 embedding_text chunk (summary for semantic search)
+    - Multiple potential_question chunks (8-12 questions per hadith)
     """
+    CHUNK_TYPE_CHOICES = [
+        ('embedding_text', 'Embedding Text'),
+        ('potential_question', 'Potential Question'),
+    ]
+
     id = models.BigAutoField(primary_key=True)
     hadith = models.ForeignKey(
         Hadith,
@@ -195,22 +206,19 @@ class HadithChunkEmbedding(models.Model):
         related_name='chunk_embeddings'
     )
     hadith_number = models.PositiveIntegerField(null=True, blank=True)
-    chunk_index = models.PositiveIntegerField()
+    chunk_type = models.CharField(max_length=20, choices=CHUNK_TYPE_CHOICES, default='embedding_text')
+    chunk_index = models.PositiveIntegerField(default=0)
     chunk_text = models.TextField()
-    language = models.CharField(max_length=10, choices=[
-        ('turkish', 'Turkish'),
-        ('arabic', 'Arabic'),
-    ])
     embedding = VectorField(dimensions=768)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = 'hadith_chunk_embeddings'
-        ordering = ['hadith_number', 'language', 'chunk_index']
+        ordering = ['hadith_number', 'chunk_type', 'chunk_index']
         indexes = [
             models.Index(fields=['hadith_number'], name='idx_chunk_hadith_number'),
-            models.Index(fields=['language'], name='idx_chunk_language'),
-            models.Index(fields=['hadith_number', 'language'], name='idx_chunk_hadith_lang'),
+            models.Index(fields=['chunk_type'], name='idx_chunk_type'),
+            models.Index(fields=['hadith_number', 'chunk_type'], name='idx_chunk_hadith_type'),
             HnswIndex(
                 name='idx_chunk_emb_hnsw',
                 fields=['embedding'],
@@ -221,4 +229,82 @@ class HadithChunkEmbedding(models.Model):
         ]
 
     def __str__(self):
-        return f"Hadith #{self.hadith_number} - {self.language} chunk {self.chunk_index}"
+        return f"Hadith #{self.hadith_number} - {self.chunk_type} [{self.chunk_index}]"
+
+
+# ============================================================
+# SIYER MODELLERI
+# ============================================================
+
+class SiyerSection(models.Model):
+    """Siyer bölüm modeli - PDF'den çıkarılan bölüm metinleri ve metadata."""
+    id = models.BigAutoField(primary_key=True)
+    section_id = models.CharField(max_length=50, unique=True)  # siyer_1b257eea63da
+    text = models.TextField()
+    pages = models.JSONField(null=True, blank=True)  # [12, 13, 14]
+    summary_short = models.TextField(null=True, blank=True)
+    main_theme = models.CharField(max_length=255, null=True, blank=True)
+    potential_questions = models.JSONField(null=True, blank=True)  # ["Soru 1?", ...]
+    query_intents = models.JSONField(null=True, blank=True)  # ["anahtar1", ...]
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'siyer_sections'
+        ordering = ['id']
+        indexes = [
+            models.Index(fields=['section_id'], name='idx_siyer_section_id'),
+            models.Index(fields=['main_theme'], name='idx_siyer_main_theme'),
+        ]
+
+    def __str__(self):
+        return f"{self.section_id} - {self.main_theme or 'N/A'}"
+
+
+class SiyerChunkEmbedding(models.Model):
+    """
+    Siyer chunk embeddings - bölüm metinleri için vektör embedding'leri.
+    Her bölüm için:
+    - 1 summary chunk (kısa özet)
+    - 10 potential_question chunk (sorular)
+    - N query_intent chunk (anahtar kavramlar)
+    """
+    CHUNK_TYPE_CHOICES = [
+        ('summary', 'Summary'),
+        ('potential_question', 'Potential Question'),
+        ('query_intent', 'Query Intent'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    section = models.ForeignKey(
+        SiyerSection,
+        on_delete=models.CASCADE,
+        related_name='chunk_embeddings'
+    )
+    section_code = models.CharField(max_length=50)  # siyer_1b257eea63da
+    chunk_type = models.CharField(max_length=20, choices=CHUNK_TYPE_CHOICES)
+    chunk_index = models.PositiveIntegerField(default=0)
+    chunk_text = models.TextField()
+    embedding = VectorField(dimensions=768)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'siyer_chunk_embeddings'
+        ordering = ['section_code', 'chunk_type', 'chunk_index']
+        indexes = [
+            models.Index(fields=['section_code'], name='idx_siyer_chunk_sec_code'),
+            models.Index(fields=['chunk_type'], name='idx_siyer_chunk_type'),
+            models.Index(fields=['section_code', 'chunk_type'], name='idx_siyer_chunk_code_type'),
+            HnswIndex(
+                name='idx_siyer_chunk_emb_hnsw',
+                fields=['embedding'],
+                m=16,
+                ef_construction=64,
+                opclasses=['vector_cosine_ops'],
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.section_code} - {self.chunk_type} [{self.chunk_index}]"
+
+
