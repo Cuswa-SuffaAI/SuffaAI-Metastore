@@ -3,10 +3,13 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from .models import Hadith, HadithEmbedding, HadithSource, HadithChunkEmbedding
 from .models import SiyerSection, SiyerChunkEmbedding
+from .models import FetvaQuestion, FetvaChunkEmbedding
 from .serializers import HadithSerializer, HadithEmbeddingSerializer, HadithSourceSerializer, HadithChunkEmbeddingSerializer
 from .serializers import SiyerSectionSerializer, SiyerChunkEmbeddingSerializer
+from .serializers import FetvaQuestionSerializer, FetvaChunkEmbeddingSerializer
 from .services import HadithService, EmbeddingService, ChunkEmbeddingService
 from .services import SiyerService, SiyerChunkEmbeddingService
+from .services import FetvaService, FetvaChunkEmbeddingService
 
 
 class HadithViewSet(viewsets.ModelViewSet):
@@ -686,6 +689,282 @@ class SiyerChunkEmbeddingViewSet(viewsets.ModelViewSet):
             return Response({
                 'deleted_count': deleted_count,
                 'section_id': section_id,
+                'chunk_type': chunk_type
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+# ============================================================
+# FETVA VIEWS
+# ============================================================
+
+class FetvaQuestionViewSet(viewsets.ModelViewSet):
+    """API endpoint for FetvaQuestion CRUD operations."""
+    queryset = FetvaQuestion.objects.all()
+    serializer_class = FetvaQuestionSerializer
+
+    @action(detail=False, methods=['get'])
+    def search(self, request):
+        """
+        Search fetva questions by subject or page.
+        GET /api/fetva-questions/search/?subject=itikat
+        GET /api/fetva-questions/search/?page=56
+        """
+        subject = request.query_params.get('subject')
+        page = request.query_params.get('page')
+
+        if subject:
+            questions = FetvaService.search_by_subject(subject)
+        elif page:
+            try:
+                questions = FetvaService.search_by_page(int(page))
+            except ValueError:
+                return Response({'error': 'page must be an integer'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            return Response(
+                {'error': 'subject or page parameter required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        serializer = self.get_serializer(questions, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['post'])
+    def bulk_create(self, request):
+        """
+        Bulk create fetva questions.
+        POST /api/fetva-questions/bulk_create/
+
+        Request body:
+        [
+            {
+                "id": "e0ca3e868553",
+                "question": "Allah nerededir?",
+                "answer": "...",
+                "page": 56,
+                "subject": "itikat",
+                "paraphrase_questions": ["Soru 1?", ...]
+            },
+            ...
+        ]
+        """
+        questions_data = request.data
+
+        if not isinstance(questions_data, list):
+            return Response(
+                {'error': 'Request body must be a list of questions'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not questions_data:
+            return Response(
+                {'error': 'Empty list provided'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            result = FetvaService.bulk_create_questions(questions_data)
+            return Response(result, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': str(e), 'traceback': traceback.format_exc()},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class FetvaChunkEmbeddingViewSet(viewsets.ModelViewSet):
+    """API endpoint for FetvaChunkEmbedding CRUD operations."""
+    queryset = FetvaChunkEmbedding.objects.all()
+    serializer_class = FetvaChunkEmbeddingSerializer
+
+    @action(detail=False, methods=['post'])
+    def bulk_create(self, request):
+        """
+        Bulk create chunk embeddings for fetva questions.
+        POST /api/fetva-chunk-embeddings/bulk_create/
+
+        Request body:
+        [
+            {
+                "fetva_id": "e0ca3e868553",
+                "chunk_type": "question",  # or "paraphrase_question"
+                "chunk_index": 0,
+                "chunk_text": "...",
+                "embedding": [0.1, 0.2, ...]
+            },
+            ...
+        ]
+        """
+        chunks_data = request.data
+
+        if not isinstance(chunks_data, list):
+            return Response(
+                {'error': 'Request body must be a list of chunk embeddings'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not chunks_data:
+            return Response(
+                {'error': 'Empty list provided'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            result = FetvaChunkEmbeddingService.bulk_create_chunk_embeddings(chunks_data)
+
+            if 'error' in result:
+                return Response(result, status=status.HTTP_400_BAD_REQUEST)
+
+            return Response(result, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['post'])
+    def search_similar(self, request):
+        """
+        Search similar fetva chunks using vector similarity.
+        POST /api/fetva-chunk-embeddings/search_similar/
+
+        Request body:
+        {
+            "embedding": [0.1, 0.2, ...],
+            "chunk_type": "question",  # optional: "question", "paraphrase_question", or null for all
+            "limit": 10                # optional
+        }
+        """
+        query_embedding = request.data.get('embedding')
+        chunk_type = request.data.get('chunk_type')
+        limit = request.data.get('limit', 10)
+
+        if not query_embedding:
+            return Response(
+                {'error': 'embedding is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not isinstance(query_embedding, list) or len(query_embedding) != 768:
+            return Response(
+                {'error': 'embedding must be a list of 768 dimensions'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if chunk_type and chunk_type not in ['question', 'paraphrase_question']:
+            return Response(
+                {'error': 'chunk_type must be "question" or "paraphrase_question"'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            results = FetvaChunkEmbeddingService.search_similar_with_details(
+                query_embedding=query_embedding,
+                chunk_type=chunk_type,
+                limit=limit
+            )
+            return Response({
+                'count': len(results),
+                'chunk_type': chunk_type,
+                'results': results
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['post'])
+    def search_combined(self, request):
+        """
+        Search fetva questions using combined score from question and paraphrase chunks.
+        POST /api/fetva-chunk-embeddings/search_combined/
+
+        The combined score is:
+        - best_question_similarity * question_weight      (higher impact, default 0.7)
+        - best_paraphrase_similarity * paraphrase_weight  (lower impact, default 0.3)
+
+        Request body:
+        {
+            "embedding": [0.1, 0.2, ...],
+            "limit": 10,
+            "question_weight": 0.7,    # optional
+            "paraphrase_weight": 0.3   # optional
+        }
+        """
+        query_embedding = request.data.get('embedding')
+        limit = request.data.get('limit', 10)
+        question_weight = request.data.get('question_weight', 0.7)
+        paraphrase_weight = request.data.get('paraphrase_weight', 0.3)
+
+        if not query_embedding:
+            return Response(
+                {'error': 'embedding is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not isinstance(query_embedding, list) or len(query_embedding) != 768:
+            return Response(
+                {'error': 'embedding must be a list of 768 dimensions'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            results = FetvaChunkEmbeddingService.search_with_combined_score(
+                query_embedding=query_embedding,
+                limit=limit,
+                question_weight=question_weight,
+                paraphrase_weight=paraphrase_weight,
+            )
+            return Response({
+                'count': len(results),
+                'weights': {
+                    'question': question_weight,
+                    'paraphrase': paraphrase_weight,
+                },
+                'results': results
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['delete'])
+    def delete_for_fetva(self, request):
+        """
+        Delete all chunk embeddings for a specific fetva question.
+        DELETE /api/fetva-chunk-embeddings/delete_for_fetva/
+
+        Request body:
+        {
+            "fetva_id": "e0ca3e868553",
+            "chunk_type": "question"  # optional
+        }
+        """
+        fetva_id = request.data.get('fetva_id')
+        chunk_type = request.data.get('chunk_type')
+
+        if not fetva_id:
+            return Response(
+                {'error': 'fetva_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            deleted_count = FetvaChunkEmbeddingService.delete_chunks_for_fetva(
+                fetva_id=fetva_id,
+                chunk_type=chunk_type
+            )
+            return Response({
+                'deleted_count': deleted_count,
+                'fetva_id': fetva_id,
                 'chunk_type': chunk_type
             })
         except Exception as e:

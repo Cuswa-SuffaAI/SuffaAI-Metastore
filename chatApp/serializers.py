@@ -1,6 +1,8 @@
 from rest_framework import serializers
 from .models import Hadith, HadithEmbedding, HadithSource, HadithChunkEmbedding
 from .models import SiyerSection, SiyerChunkEmbedding
+from .models import FetvaQuestion, FetvaChunkEmbedding
+from .models import FetvaQuestion, FetvaChunkEmbedding
 
 
 class HadithSourceSerializer(serializers.ModelSerializer):
@@ -61,10 +63,37 @@ class SiyerSectionSerializer(serializers.ModelSerializer):
             'section_id',
             'text',
             'pages',
+            'volume',
             'summary_short',
             'main_theme',
             'potential_questions',
             'query_intents',
+            'created_at',
+            'updated_at',
+        ]
+
+
+# ============================================================
+# FETVA SERIALIZERS
+# ============================================================
+
+class FetvaChunkEmbeddingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FetvaChunkEmbedding
+        fields = ['id', 'fetva_code', 'chunk_type', 'chunk_index', 'chunk_text', 'embedding', 'created_at']
+
+
+class FetvaQuestionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FetvaQuestion
+        fields = [
+            'id',
+            'fetva_id',
+            'question',
+            'answer',
+            'page',
+            'subject',
+            'paraphrase_questions',
             'created_at',
             'updated_at',
         ]

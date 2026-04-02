@@ -242,6 +242,7 @@ class SiyerSection(models.Model):
     section_id = models.CharField(max_length=50, unique=True)  # siyer_1b257eea63da
     text = models.TextField()
     pages = models.JSONField(null=True, blank=True)  # [12, 13, 14]
+    volume = models.JSONField(null=True, blank=True)  # ["1-2. Cilt"]
     summary_short = models.TextField(null=True, blank=True)
     main_theme = models.CharField(max_length=255, null=True, blank=True)
     potential_questions = models.JSONField(null=True, blank=True)  # ["Soru 1?", ...]
@@ -308,3 +309,74 @@ class SiyerChunkEmbedding(models.Model):
         return f"{self.section_code} - {self.chunk_type} [{self.chunk_index}]"
 
 
+# ============================================================
+# FETVA MODELLERI
+# ============================================================
+
+class FetvaQuestion(models.Model):
+    """Fetva questions - stores question, answer and metadata."""
+    id = models.BigAutoField(primary_key=True)
+    fetva_id = models.CharField(max_length=50, unique=True)  # e0ca3e868553
+    question = models.TextField()
+    answer = models.TextField()
+    page = models.PositiveIntegerField(null=True, blank=True)
+    subject = models.CharField(max_length=100, null=True, blank=True)  # itikat, fıkıh, etc.
+    paraphrase_questions = models.JSONField(null=True, blank=True)  # ["Question 1?", ...]
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'fetva_questions'
+        ordering = ['id']
+        indexes = [
+            models.Index(fields=['fetva_id'], name='idx_fetva_id'),
+            models.Index(fields=['subject'], name='idx_fetva_subject'),
+        ]
+
+    def __str__(self):
+        return f"{self.fetva_id} - {self.question[:60]}"
+
+
+class FetvaChunkEmbedding(models.Model):
+    """
+    Fetva chunk embeddings - vector embeddings for questions.
+    Per fetva:
+    - 1 question chunk (original question)
+    - N paraphrase_question chunks (paraphrased questions)
+    """
+    CHUNK_TYPE_CHOICES = [
+        ('question', 'Question'),
+        ('paraphrase_question', 'Paraphrase Question'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    fetva = models.ForeignKey(
+        FetvaQuestion,
+        on_delete=models.CASCADE,
+        related_name='chunk_embeddings'
+    )
+    fetva_code = models.CharField(max_length=50)  # e0ca3e868553
+    chunk_type = models.CharField(max_length=20, choices=CHUNK_TYPE_CHOICES)
+    chunk_index = models.PositiveIntegerField(default=0)
+    chunk_text = models.TextField()
+    embedding = VectorField(dimensions=768)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'fetva_chunk_embeddings'
+        ordering = ['fetva_code', 'chunk_type', 'chunk_index']
+        indexes = [
+            models.Index(fields=['fetva_code'], name='idx_fetva_chunk_fetva_code'),
+            models.Index(fields=['chunk_type'], name='idx_fetva_chunk_type'),
+            models.Index(fields=['fetva_code', 'chunk_type'], name='idx_fetva_chunk_code_type'),
+            HnswIndex(
+                name='idx_fetva_chunk_emb_hnsw',
+                fields=['embedding'],
+                m=16,
+                ef_construction=64,
+                opclasses=['vector_cosine_ops'],
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.fetva_code} - {self.chunk_type} [{self.chunk_index}]"

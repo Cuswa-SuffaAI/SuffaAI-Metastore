@@ -9,6 +9,8 @@ router.register(r'hadith-sources', views.HadithSourceViewSet, basename='hadith-s
 router.register(r'hadith-chunk-embeddings', views.HadithChunkEmbeddingViewSet, basename='hadith-chunk-embedding')
 router.register(r'siyer-sections', views.SiyerSectionViewSet, basename='siyer-section')
 router.register(r'siyer-chunk-embeddings', views.SiyerChunkEmbeddingViewSet, basename='siyer-chunk-embedding')
+router.register(r'fetva-questions', views.FetvaQuestionViewSet, basename='fetva-question')
+router.register(r'fetva-chunk-embeddings', views.FetvaChunkEmbeddingViewSet, basename='fetva-chunk-embedding')
 
 urlpatterns = [
     path('', include(router.urls)),

@@ -2,6 +2,7 @@ from django.db import transaction
 from pgvector.django import CosineDistance, L2Distance, MaxInnerProduct
 from .models import Hadith, HadithEmbedding, HadithSource, HadithChunkEmbedding
 from .models import SiyerSection, SiyerChunkEmbedding
+from .models import FetvaQuestion, FetvaChunkEmbedding
 
 
 class HadithService:
@@ -547,6 +548,7 @@ class SiyerService:
             section_id=data.get('id'),
             text=data.get('text'),
             pages=data.get('pages'),
+            volume=data.get('volume'),
             summary_short=data.get('content_information', {}).get('summary_short'),
             main_theme=data.get('content_information', {}).get('main_theme'),
             potential_questions=data.get('potential_questions'),
@@ -600,6 +602,7 @@ class SiyerService:
                 section_id=section_id,
                 text=item.get('text'),
                 pages=item.get('pages'),
+                volume=item.get('volume'),
                 summary_short=content_info.get('summary_short'),
                 main_theme=content_info.get('main_theme'),
                 potential_questions=item.get('potential_questions'),
@@ -802,6 +805,7 @@ class SiyerChunkEmbeddingService:
                 'section_id': sid,
                 'text': section.text,
                 'pages': section.pages,
+                'volume': section.volume,
                 'summary_short': section.summary_short,
                 'main_theme': section.main_theme,
                 'potential_questions': section.potential_questions,
@@ -853,6 +857,296 @@ class SiyerChunkEmbeddingService:
                     'main_theme': r.section.main_theme,
                     'potential_questions': r.section.potential_questions,
                     'query_intents': r.section.query_intents,
+                }
+            }
+            for r in results
+        ]
+
+
+# ============================================================
+# FETVA SERVİSLERİ
+# ============================================================
+
+class FetvaService:
+    """Business logic for Fetva operations."""
+
+    @staticmethod
+    @transaction.atomic
+    def bulk_create_questions(questions_data: list[dict]) -> dict:
+        """
+        Bulk create fetva questions.
+
+        Expected format:
+        [
+            {
+                "id": "e0ca3e868553",
+                "question": "Allah nerededir?",
+                "answer": "...",
+                "page": 56,
+                "subject": "itikat",
+                "paraphrase_questions": ["Soru 1?", ...]
+            },
+            ...
+        ]
+        """
+        incoming_ids = [item.get('id') for item in questions_data]
+        existing_ids = set(
+            FetvaQuestion.objects.filter(fetva_id__in=incoming_ids)
+            .values_list('fetva_id', flat=True)
+        )
+
+        question_objects = []
+        skipped = []
+
+        for item in questions_data:
+            fetva_id = item.get('id')
+            if fetva_id in existing_ids:
+                skipped.append(fetva_id)
+                continue
+
+            question_objects.append(FetvaQuestion(
+                fetva_id=fetva_id,
+                question=item.get('question'),
+                answer=item.get('answer'),
+                page=item.get('page'),
+                subject=item.get('subject'),
+                paraphrase_questions=item.get('paraphrase_questions'),
+            ))
+
+        created = []
+        if question_objects:
+            created = FetvaQuestion.objects.bulk_create(question_objects)
+
+        return {
+            'questions_created': len(created),
+            'skipped_existing': skipped,
+            'fetva_ids': [q.fetva_id for q in created],
+        }
+
+    @staticmethod
+    def get_question_by_id(fetva_id: str) -> FetvaQuestion:
+        """Get a fetva question by its fetva_id."""
+        return FetvaQuestion.objects.get(fetva_id=fetva_id)
+
+    @staticmethod
+    def search_by_subject(subject: str):
+        """Search fetva questions by subject."""
+        return FetvaQuestion.objects.filter(subject__icontains=subject)
+
+    @staticmethod
+    def search_by_page(page: int):
+        """Search fetva questions by page number."""
+        return FetvaQuestion.objects.filter(page=page)
+
+
+class FetvaChunkEmbeddingService:
+    """Business logic for fetva chunk-based embedding operations."""
+
+    @staticmethod
+    @transaction.atomic
+    def bulk_create_chunk_embeddings(chunks_data: list[dict]) -> dict:
+        """
+        Bulk create chunk embeddings for fetva questions.
+
+        Expected format:
+        [
+            {
+                "fetva_id": "e0ca3e868553",
+                "chunk_type": "question",  # or "paraphrase_question"
+                "chunk_index": 0,
+                "chunk_text": "...",
+                "embedding": [0.1, 0.2, ...]  # 768 dimensions
+            },
+            ...
+        ]
+        """
+        fetva_ids = list(set(item.get('fetva_id') for item in chunks_data))
+
+        fetvas = FetvaQuestion.objects.filter(fetva_id__in=fetva_ids)
+        fetva_map = {f.fetva_id: f for f in fetvas}
+
+        missing = set(fetva_ids) - set(fetva_map.keys())
+        if missing:
+            return {
+                'error': f'Fetva questions not found for fetva_ids: {list(missing)}',
+                'chunks_created': 0,
+            }
+
+        chunk_objects = []
+        for item in chunks_data:
+            fetva_id = item.get('fetva_id')
+            fetva = fetva_map.get(fetva_id)
+            if fetva:
+                chunk_objects.append(FetvaChunkEmbedding(
+                    fetva=fetva,
+                    fetva_code=fetva_id,
+                    chunk_type=item.get('chunk_type'),
+                    chunk_index=item.get('chunk_index', 0),
+                    chunk_text=item.get('chunk_text'),
+                    embedding=item.get('embedding'),
+                ))
+
+        created = []
+        if chunk_objects:
+            created = FetvaChunkEmbedding.objects.bulk_create(chunk_objects)
+
+        return {
+            'chunks_created': len(created),
+            'chunk_ids': [c.id for c in created],
+        }
+
+    @staticmethod
+    def delete_chunks_for_fetva(fetva_id: str, chunk_type: str = None) -> int:
+        """Delete existing chunks for a fetva question before re-creating."""
+        queryset = FetvaChunkEmbedding.objects.filter(fetva_code=fetva_id)
+        if chunk_type:
+            queryset = queryset.filter(chunk_type=chunk_type)
+        count, _ = queryset.delete()
+        return count
+
+    @staticmethod
+    def search_similar_chunks(
+        query_embedding: list,
+        chunk_type: str = None,
+        limit: int = 10
+    ):
+        """
+        Search similar fetva chunks using pgvector similarity search.
+
+        Args:
+            query_embedding: 768-dimensional vector
+            chunk_type: 'question' or 'paraphrase_question' (None for all)
+            limit: max results to return
+        """
+        distance_func = CosineDistance('embedding', query_embedding)
+
+        queryset = FetvaChunkEmbedding.objects.all()
+        if chunk_type:
+            queryset = queryset.filter(chunk_type=chunk_type)
+
+        return (
+            queryset
+            .annotate(distance=distance_func)
+            .order_by('distance')
+            .select_related('fetva')
+            [:limit]
+        )
+
+    @staticmethod
+    def search_with_combined_score(
+        query_embedding: list,
+        limit: int = 10,
+        question_weight: float = 0.7,
+        paraphrase_weight: float = 0.3,
+    ):
+        """
+        Search fetva questions using combined score from question and paraphrase chunks.
+
+        The combined score is:
+        - best_question_similarity * question_weight         (higher impact)
+        - best_paraphrase_similarity * paraphrase_weight     (lower impact)
+
+        Args:
+            query_embedding: 768-dimensional vector
+            limit: max results to return
+            question_weight: weight for original question match (default 0.7)
+            paraphrase_weight: weight for paraphrase question match (default 0.3)
+        """
+        distance_func = CosineDistance('embedding', query_embedding)
+
+        all_chunks = (
+            FetvaChunkEmbedding.objects
+            .annotate(distance=distance_func)
+            .select_related('fetva')
+            .order_by('distance')
+        )
+
+        fetva_scores = {}
+
+        for chunk in all_chunks:
+            fid = chunk.fetva_code
+            similarity = 1 - float(chunk.distance)
+
+            if fid not in fetva_scores:
+                fetva_scores[fid] = {
+                    'fetva': chunk.fetva,
+                    'best_question_similarity': 0.0,
+                    'best_paraphrase_similarity': 0.0,
+                    'matching_paraphrases': [],
+                }
+
+            if chunk.chunk_type == 'question':
+                if similarity > fetva_scores[fid]['best_question_similarity']:
+                    fetva_scores[fid]['best_question_similarity'] = similarity
+            elif chunk.chunk_type == 'paraphrase_question':
+                if similarity > fetva_scores[fid]['best_paraphrase_similarity']:
+                    fetva_scores[fid]['best_paraphrase_similarity'] = similarity
+                if similarity > 0.5:
+                    fetva_scores[fid]['matching_paraphrases'].append({
+                        'question': chunk.chunk_text,
+                        'similarity': similarity,
+                    })
+
+        results = []
+        for fid, data in fetva_scores.items():
+            combined_score = (
+                data['best_question_similarity'] * question_weight +
+                data['best_paraphrase_similarity'] * paraphrase_weight
+            )
+
+            fetva = data['fetva']
+            results.append({
+                'fetva_id': fid,
+                'question': fetva.question,
+                'answer': fetva.answer,
+                'page': fetva.page,
+                'subject': fetva.subject,
+                'paraphrase_questions': fetva.paraphrase_questions,
+                'scores': {
+                    'combined': combined_score,
+                    'best_question_similarity': data['best_question_similarity'],
+                    'best_paraphrase_similarity': data['best_paraphrase_similarity'],
+                },
+                'matching_paraphrases': sorted(
+                    data['matching_paraphrases'],
+                    key=lambda x: x['similarity'],
+                    reverse=True,
+                )[:3],
+            })
+
+        results.sort(key=lambda x: x['scores']['combined'], reverse=True)
+        return results[:limit]
+
+    @staticmethod
+    def search_similar_with_details(
+        query_embedding: list,
+        chunk_type: str = None,
+        limit: int = 10
+    ):
+        """
+        Search similar fetva chunks and return full question details.
+        """
+        results = FetvaChunkEmbeddingService.search_similar_chunks(
+            query_embedding=query_embedding,
+            chunk_type=chunk_type,
+            limit=limit,
+        )
+
+        return [
+            {
+                'chunk_id': r.id,
+                'fetva_id': r.fetva_code,
+                'chunk_type': r.chunk_type,
+                'chunk_index': r.chunk_index,
+                'chunk_text': r.chunk_text,
+                'distance': float(r.distance),
+                'similarity': 1 - float(r.distance),
+                'fetva': {
+                    'question': r.fetva.question,
+                    'answer': r.fetva.answer,
+                    'page': r.fetva.page,
+                    'subject': r.fetva.subject,
+                    'paraphrase_questions': r.fetva.paraphrase_questions,
                 }
             }
             for r in results
